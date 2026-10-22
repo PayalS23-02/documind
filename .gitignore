@@ -9,3 +9,4 @@ chroma_db/
 node_modules/
 dist/
 .DS_Store
+backend/sample_docs/VIT_Bhopal_Curriculum.pdf

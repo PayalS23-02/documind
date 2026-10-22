@@ -6,6 +6,7 @@ Endpoints:
   POST /query    - ask a question, get a grounded, cited answer
   GET  /health   - basic health/status check
 """
+import logging
 import shutil
 import tempfile
 from pathlib import Path
@@ -15,13 +16,35 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
+from .embeddings import EmbeddingError
 from .generation import generate_answer
 from .ingestion import ingest_pdf
 from .retrieval import retrieve
 from .schemas import HealthResponse, IngestResponse, QueryRequest, QueryResponse, SourceInfo
 from .vectorstore import add_chunks, get_collection
 
+logger = logging.getLogger("documind")
+
 app = FastAPI(title="DocuMind API", version="1.0.0")
+
+
+def _friendly_model_error(exc: Exception) -> str:
+    """Turn a raw Gemini error into a short message the chat UI can show."""
+    msg = str(exc)
+    low = msg.lower()
+    if "429" in low or "resource_exhausted" in low or "quota" in low:
+        return (
+            "Gemini API rate limit or daily quota reached. "
+            "Wait a few minutes (or until the quota resets) and try again."
+        )
+    if "503" in low or "unavailable" in low or "high demand" in low:
+        return "The Gemini model is busy right now. Please try again in a minute."
+    if "404" in low or "not found" in low:
+        return (
+            "The configured Gemini model was not found. "
+            "Check GENERATION_MODEL in your .env file."
+        )
+    return f"The AI model returned an error: {msg[:200]}"
 
 # Allow the React dev server to call this API directly.
 app.add_middleware(
@@ -62,7 +85,11 @@ async def ingest(files: List[UploadFile] = File(...)):
                 chunk_overlap=settings.chunk_overlap,
             )
             if chunks:
-                total_chunks += add_chunks(chunks)
+                try:
+                    total_chunks += add_chunks(chunks)
+                except EmbeddingError as exc:
+                    # Return a readable message to the UI instead of hanging
+                    raise HTTPException(status_code=502, detail=str(exc))
 
     return IngestResponse(documents_ingested=len(files), chunks_stored=total_chunks)
 
@@ -70,8 +97,16 @@ async def ingest(files: List[UploadFile] = File(...)):
 @app.post("/query", response_model=QueryResponse)
 def query(request: QueryRequest):
     """Ask a natural-language question and get a grounded, cited answer."""
-    chunks = retrieve(request.question, top_k=request.top_k)
-    result = generate_answer(request.question, chunks)
+    try:
+        chunks = retrieve(request.question, top_k=request.top_k)
+        result = generate_answer(request.question, chunks)
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:
+        # Without this, an unexpected error becomes a bare 500 with no CORS
+        # header and the browser only shows "Failed to fetch".
+        logger.exception("Query failed")
+        raise HTTPException(status_code=502, detail=_friendly_model_error(exc))
 
     return QueryResponse(
         answer=result["answer"],
