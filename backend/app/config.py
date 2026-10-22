@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # Gemini
     gemini_api_key: str = ""
     embedding_model: str = "gemini-embedding-001"
-    generation_model: str = "gemini-2.5-flash"
+    generation_model: str = "gemini-3.1-flash-lite"
 
     # Chunking
     chunk_size: int = 800          # characters per chunk (approx)
